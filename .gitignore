@@ -393,3 +393,6 @@ FodyWeavers.xsd
 *.sln.iml
 
 # End of https://www.toptal.com/developers/gitignore/api/csharp
+
+# Ignoring App.config as it may contain sensitive information
+App.config
