@@ -27,29 +27,35 @@ namespace update_pairs
         static string key = ConfigurationManager.AppSettings["3c_api_key"];
         static string secret = ConfigurationManager.AppSettings["3c_api_secret"];
         static string market = ConfigurationManager.AppSettings["3c_market"];
-        static int accountId = Convert.ToInt32(ConfigurationManager.AppSettings["3c_accountId"]);
+        static string baseType = ConfigurationManager.AppSettings["baseType"];
+        static bool usePerp = Boolean.Parse(ConfigurationManager.AppSettings["usePerp"] ?? "false");
         static int botId = Convert.ToInt32(ConfigurationManager.AppSettings["3c_botId"]);
-        static string quote = ConfigurationManager.AppSettings["quote"];
+        static int accountId = Convert.ToInt32(ConfigurationManager.AppSettings["3c_accountId"]);
+
 
         public static XCommasApi api;
         public static HttpClient hc = new HttpClient();
 
-        public static int MAX_ALTRANK_PAIRS = 15;
-        public static int MAX_GALAXY_PAIRS = 15;
+        public static int MAX_BUBBLE_PAIRS = 50;
 
         static void Main() { MainAsync().GetAwaiter().GetResult(); }
 
         static async Task MainAsync()
         {
+            string perp = ((usePerp) ? "-PERP" : "");
+
             api = new XCommasApi(key, secret, default, UserMode.Real);
 
             Console.WriteLine("API successfully connected, please standby ...");
             
             // Get list of all accounts, and find the one we want
             var accts = await api.GetAccountsAsync();
-            foreach (var acct in accts.Data)
+            if (accountId != 0)
             {
-                if (acct.MarketCode == market) { accountId = acct.Id; break; }
+                foreach (var acct in accts.Data)
+                {
+                    if (acct.MarketCode == market) { accountId = acct.Id; break; }
+                }
             }
 
             // get list of ALL market pairs available for account as well as the current blacklist
@@ -57,17 +63,19 @@ namespace update_pairs
             var marketPairsBlacklisted = await api.GetBotPairsBlackListAsync();
 
             // Add each pair to a collection, unless its blacklisted
-            HashSet<string> allPairsOnExchange = new HashSet<string>();
+            HashSet<string> pairs = new HashSet<string>();
             foreach (string p in marketPairs.Data)
             {
                 if (!marketPairsBlacklisted.Data.Pairs.Contains(p))
-                    allPairsOnExchange.Add(p);
+                    pairs.Add(p + perp);
             }
 
             while (true)
             {
                 try
                 {
+                    #region LunarCrush
+                    /*
                     LunarCrushRoot res = await GetJSON<LunarCrushRoot>("https://api.lunarcrush.com/v2?data=market&type=fast&sort=acr&limit=1000&key=asdf");
                     HashSet<string> pairsToUpdate = new HashSet<string>();
                     foreach (Datum d in res.data)
@@ -79,13 +87,38 @@ namespace update_pairs
                     int altRankPairsCount = pairsToUpdate.Count;
 
                     res = await GetJSON<LunarCrushRoot>("https://api.lunarcrush.com/v2?data=market&type=fast&sort=gs&limit=1000&key=asdf&desc=True");
-                    //Console.Write("Updating Galaxy Score pairs: ");
                     foreach (Datum d in res.data)
                     {
                         if (pairsToUpdate.Count >= altRankPairsCount + MAX_GALAXY_PAIRS) break;
                         string pair = $"{quote}_{d.s}";
                         if (allPairsOnExchange.Contains(pair) && !pairsToUpdate.Contains(pair)) pairsToUpdate.Add(pair);
                     }
+                    */
+                    #endregion
+
+                    #region CryptoBubbles
+                    Console.WriteLine("Adding cryptobubble pairs...");
+                    List<Bubble500Root> bubbles = await GetJSON<List<Bubble500Root>>("https://cryptobubbles.net/backend/data/currentBubbles500.json");
+
+                    bubbles = bubbles.OrderByDescending(x => x.data.usd.performance.min5).ToList();
+
+                    HashSet<string> pairsToUpdate = new HashSet<string>();
+                    int idx = 1;
+                    foreach (Bubble500Root bubble in bubbles)
+                    {
+                        if (pairsToUpdate.Count >= MAX_BUBBLE_PAIRS) break;
+                        string pair = $"{baseType}_{bubble.symbol}{perp}";
+                        if (!pairsToUpdate.Contains(pair))
+                        {
+                            if (pairs.Contains(pair))
+                            {
+                                pairsToUpdate.Add(pair);
+                                //Console.WriteLine($"{idx}) Added {pair} on {market}, performance: {bubble.data.usd.performance.min5}");
+                            }
+                        }
+                        idx++;
+                    }
+                    #endregion
 
                     var sb = await api.ShowBotAsync(botId: botId);
                     Bot bot = sb.Data;
@@ -102,6 +135,29 @@ namespace update_pairs
                         Console.WriteLine("  Removed: " + string.Join(" ", pairsRemoving));
                         Console.WriteLine("    Added: " + string.Join(" ", pairsAdding));
                         Console.WriteLine("");
+                    }
+                    else
+                    {
+                        //I couldn't find the market code for ftx futures although it probably exists
+                        if (ub.Error.Contains("No market data for this pair"))
+                        {
+                            string[] badPairs = ub.Error.Split(": ").Select(p => p.Substring(0, p.IndexOf('"'))).ToArray();
+                            foreach (string badPair in badPairs)
+                                if (pairsToUpdate.Contains(badPair))
+                                {
+                                    Console.WriteLine($"Removed {badPair} on {market} because it only exists on spot");
+                                    pairsToUpdate.Remove(badPair);
+                                }
+                                else if (badPair.Contains(baseType)) Console.WriteLine(badPair + " malformed?");
+                            bot.Pairs = pairsToUpdate.ToArray();
+                            ub = await api.UpdateBotAsync(botId, new BotUpdateData(bot));
+                            if (ub.IsSuccess) Console.WriteLine($"\nSuccessfully updated {bot.Name} with {pairsToUpdate.Count} new pairs..");
+                            else Console.WriteLine($"ERROR: {ub.Error}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"ERROR: {ub.Error}");
+                        }
                     }
                 }
                 catch (Exception ex)
